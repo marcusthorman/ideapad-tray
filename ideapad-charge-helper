@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Privileged backend for IdeaPad charge control.
+
+Runs as root (via pkexec from the tray). Performs the only two operations
+that need privilege: toggling conservation mode (sysfs) and fast charging
+(the SBMC ACPI method via acpi_call). All other state is world-readable, so
+the tray reads status itself without invoking this helper.
+
+Usage:
+    ideapad-charge-helper get
+    ideapad-charge-helper conservation on|off
+    ideapad-charge-helper fastcharge   on|off
+"""
+import glob
+import json
+import os
+import subprocess
+import sys
+
+CONSERVATION_GLOB = "/sys/bus/platform/drivers/ideapad_acpi/*/conservation_mode"
+ACPI_CALL = "/proc/acpi/call"
+VPC_PATH_FILE = "/sys/bus/acpi/devices/VPC2004:00/path"
+STATE_DIR = "/var/lib/ideapad-charge"
+STATE_FILE = os.path.join(STATE_DIR, "fastcharge")
+
+# SBMC argument values used by the Lenovo EC. Conservation is driven through
+# sysfs instead, so only the fast-charge pair is used here.
+SBMC_FASTCHARGE_ON = 0x07
+SBMC_FASTCHARGE_OFF = 0x08
+
+
+def conservation_path():
+    matches = glob.glob(CONSERVATION_GLOB)
+    return matches[0] if matches else None
+
+
+def vpc_path():
+    try:
+        with open(VPC_PATH_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def sbmc_method():
+    """Derive the SBMC ACPI method path from the VPC2004 device namespace."""
+    vpc = vpc_path()
+    return vpc + ".SBMC" if vpc else None
+
+
+def gbmd_method():
+    """GBMD (sibling of SBMC on VPC0) returns the EC battery-mode bitfield —
+    the only ground truth for rapid charge, since SBMC is write-only.
+    Verified on this DSDT: bit 0x4 tracks SBMC 0x07/0x08 exactly."""
+    vpc = vpc_path()
+    return vpc + ".GBMD" if vpc else None
+
+
+GBMD_FASTCHARGE_BIT = 0x4
+
+
+def acpi_call(expr):
+    with open(ACPI_CALL, "w") as f:
+        f.write(expr)
+    with open(ACPI_CALL) as f:
+        return f.read().strip("\x00").strip()
+
+
+def read_fastcharge_ec():
+    """Actual rapid-charge state from the EC, or None if GBMD is unavailable."""
+    method = gbmd_method()
+    if not method or not ensure_acpi_call():
+        return None
+    try:
+        result = acpi_call(method)
+        if result.startswith("0x"):
+            return 1 if int(result, 16) & GBMD_FASTCHARGE_BIT else 0
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def ensure_acpi_call():
+    if not os.path.exists(ACPI_CALL):
+        subprocess.run(["modprobe", "acpi_call"],
+                       check=False, capture_output=True)
+    return os.path.exists(ACPI_CALL)
+
+
+def read_fastcharge_state():
+    try:
+        with open(STATE_FILE) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return -1  # unknown / never set
+
+
+def write_fastcharge_state(value):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(str(value))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, STATE_FILE)
+
+
+def read_state():
+    cons = None
+    cp = conservation_path()
+    if cp:
+        try:
+            with open(cp) as f:
+                cons = int(f.read().strip())
+        except (OSError, ValueError):
+            cons = None
+    fast_ec = read_fastcharge_ec()
+    if fast_ec is not None:
+        fast = fast_ec
+        if fast != read_fastcharge_state():
+            write_fastcharge_state(fast)
+    else:
+        fast = read_fastcharge_state()
+        # Conservation and fast charging are mutually exclusive in the EC: if
+        # conservation is on, fast charging is necessarily off.
+        if cons == 1:
+            fast = 0
+    return {
+        "conservation": cons,
+        "fastcharge": fast,
+        "fastcharge_source": "ec" if fast_ec is not None else "state-file",
+        "conservation_available": cp is not None,
+        "fastcharge_available": os.path.exists(ACPI_CALL) and sbmc_method() is not None,
+        "sbmc": sbmc_method(),
+    }
+
+
+def set_conservation(on):
+    cp = conservation_path()
+    if not cp:
+        die("conservation_mode sysfs not found (ideapad_laptop loaded?)")
+    with open(cp, "w") as f:
+        f.write("1" if on else "0")
+    # Turning conservation on forces fast charging off in the EC.
+    if on:
+        write_fastcharge_state(0)
+
+
+def set_fastcharge(on):
+    if not ensure_acpi_call():
+        die("acpi_call module unavailable (install the 'acpi_call' package)")
+    method = sbmc_method()
+    if not method:
+        die("could not resolve SBMC ACPI method path")
+    value = SBMC_FASTCHARGE_ON if on else SBMC_FASTCHARGE_OFF
+    result = acpi_call(f"{method} 0x{value:x}")
+    if result and ("error" in result.lower() or "not" in result.lower()):
+        die(f"ACPI call failed: {result}")
+    desired = 1 if on else 0
+    actual = read_fastcharge_ec()
+    if actual is not None and actual != desired:
+        write_fastcharge_state(actual)
+        die(f"EC did not apply rapid charge ({'on' if on else 'off'}): "
+            f"it still reports {'on' if actual else 'off'}")
+    write_fastcharge_state(desired)
+
+
+def die(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def usage():
+    die("usage: ideapad-charge-helper get | conservation on|off | fastcharge on|off")
+
+
+def main():
+    if len(sys.argv) < 2:
+        usage()
+    cmd = sys.argv[1]
+    if cmd == "get":
+        print(json.dumps(read_state()))
+        return
+    if cmd in ("conservation", "fastcharge"):
+        if len(sys.argv) != 3 or sys.argv[2] not in ("on", "off"):
+            usage()
+        on = sys.argv[2] == "on"
+        if cmd == "conservation":
+            set_conservation(on)
+        else:
+            set_fastcharge(on)
+        print(json.dumps(read_state()))
+        return
+    usage()
+
+
+if __name__ == "__main__":
+    main()

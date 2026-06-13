@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=IdeaPad Charge
+Comment=Toggle conservation mode and fast charging
+Exec=/usr/local/bin/ideapad-tray
+Icon=battery
+Terminal=false
+Categories=Utility;System;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

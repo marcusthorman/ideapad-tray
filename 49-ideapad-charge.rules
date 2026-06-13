@@ -1,0 +1,9 @@
+// Allow members of the wheel group to run the IdeaPad charge helper through
+// pkexec without a password prompt. Scoped to the exact helper binary only.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("program") == "/usr/local/bin/ideapad-charge-helper" &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
