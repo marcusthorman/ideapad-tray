@@ -1,5 +1,10 @@
 # IdeaPad Charge Tray
 
+![Python 3](https://img.shields.io/badge/python-3.x-blue?logo=python&logoColor=white)
+![PyQt6](https://img.shields.io/badge/GUI-PyQt6-41cd52?logo=qt&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Linux%20%28Arch%2FCachyOS%29-1793d1?logo=archlinux&logoColor=white)
+![Desktop](https://img.shields.io/badge/desktop-KDE%20Plasma-1d99f3?logo=kde&logoColor=white)
+
 A KDE/Plasma system-tray app for the **Lenovo IdeaPad 5 Pro 16ACH6** (and other
 `ideapad_laptop` machines) to toggle:
 
